@@ -1,0 +1,160 @@
+# runs GLM analysis based on edgeR to identify statistically significantly imprinted genes
+# for RNA-seq samples of a reciprocal F1 cross
+#
+# assumes that allelic count tables are located in the same directory 
+# with file names "Counts_Alleles_SRRxxxxxxx" where xxxxxxx is the SRR sample ID
+#
+# this is an example for ColxLer and LerxCol samples from Pignatta et al. (2014)
+# *NOTE* this script is not fully generalized - 
+# several things in <Data Loading and Preparation> and <Create Design Matrix> are hard-coded and have to be adapted for different datasets
+
+# usage: Rscript run_edgeR_LerCol.R
+#
+# 2016-08-14 Stefan Wyder
+
+library("edgeR")
+library("doBy")
+library("ggplot2")
+
+
+
+options(width=120)
+cross <- "Pignata_Ler_Col"  # used for file names of diagnostic plots
+fdr_cutoff <- 0.05          # FDR cut-off 5%
+ColxLer_Samples <- c("SRR1039929","SRR1508239","SRR1508241")   # Col x Ler samples, all other samples are assumed to be from reciprocal cross Ler x Col
+
+######################
+# Functions 
+######################
+
+#' Merges allelic count tables in the current folder (output of Classify_Alleles.py)
+#'
+#' @param FileNameStart The name start of allelic count files to be merged 
+#' @param ClipString Part of file names to be clipped from column/sample names  
+#'
+#' @return A data frame with allelic counts for all samples, gene names as row names
+#' @author Stefan Wyder
+#' 
+multiMerge <- function(FileNameStart, ClipString){
+  filenames <- list.files(path=".", pattern=paste0(FileNameStart, "*"))
+  shortnames <- gsub(ClipString, "", filenames)
+  datalist <- lapply(filenames, function(x) {read.csv(file=x, header=T, sep="\t")})
+  for (i in 1:length(filenames)) {
+    names(datalist[[i]]) <- c("Gene", paste0("ref_", shortnames[i]), paste0("nef_", shortnames[i]))
+  }
+  merged <- Reduce(function(x,y) {merge(x,y, by="Gene", all.x=TRUE)}, datalist)
+  row.names(merged) <- merged$Gene
+  merged$Gene <- NULL
+  return(merged)
+}
+
+######################
+# load and prepare data 
+######################
+
+# merges all count files in current directory named 'Counts_Alleles_SRRxxxxxxx'
+#  clips "Counts_Alleles_" from samples names in merged count table 
+counts_summed <- multiMerge("Counts_Alleles_SRR", "Counts_Alleles_")
+# missing genes have 0 counts
+counts_summed[is.na(counts_summed)] <- 0
+
+# Assign maternal and paternal depending on cross direction 
+# ref: reference allele Col, nef: non-reference allele Ler
+Assign_mat_pat_CxL <- function(x) ifelse(grepl("ref_", x), sub("ref_", "mat_", x), sub("nef_", "pat_", x))
+Assign_mat_pat_LxC <- function(x) ifelse(grepl("nef_", x), sub("nef_", "mat_", x), sub("ref_", "pat_", x))
+is_ColxLer_Sample <- sapply(colnames(counts_summed), FUN=function(x) {strsplit(x, fixed=T, split="_")[[1]][2]}) %in% ColxLer_Samples
+colnames(counts_summed)[is_ColxLer_Sample] <- sapply(colnames(counts_summed)[is_ColxLer_Sample], Assign_mat_pat_CxL)
+colnames(counts_summed)[!is_ColxLer_Sample] <- sapply(colnames(counts_summed)[!is_ColxLer_Sample], Assign_mat_pat_LxC)
+
+print(dim(counts_summed))
+
+# filter out genes with less than 10 counts overall
+counts_summed_over10 <- counts_summed[rowSums(counts_summed) >= 10, ]  
+print(dim(counts_summed_over10))
+
+######################
+# create design matrix
+#####################
+
+design <- data.frame(row.names=colnames(counts_summed_over10), mother=ifelse(is_ColxLer_Sample, "Col", "Ler"), type=ifelse(grepl("mat_", colnames(counts_summed_over10)),"mother","father"), cross=ifelse(is_ColxLer_Sample, "1","2"))
+edgeR.design <- model.matrix(~design$cross + design$type)
+print(colnames(edgeR.design))
+print(edgeR.design)
+
+######################
+# run edgeR
+######################
+
+edgeR <- DGEList(counts=counts_summed_over10, genes=row.names(counts_summed_over10))
+print(head(counts_summed_over10, 5))
+edgeR <- calcNormFactors(edgeR)
+print(edgeR$samples$norm.factors)
+
+edgeR <- estimateGLMCommonDisp(edgeR, edgeR.design)
+edgeR <- estimateGLMTrendedDisp(edgeR, edgeR.design)
+edgeR <- estimateGLMTagwiseDisp(edgeR, edgeR.design)
+
+pdf(paste0("BCV_edgeR_", cross, ".pdf"))
+plotBCV(edgeR)
+dev.off()
+
+print(paste0("edgeR common dispersion: ", edgeR$common.dispersion))
+edgeR.fit <- glmFit(edgeR, edgeR.design)
+edgeR.lrt <- glmLRT(edgeR.fit, coef="design$typemother")
+
+pdf(paste0("Smear_edgeR_", cross, ".pdf"))
+plotSmear(edgeR.lrt)
+dev.off()
+
+# print number of MEGs and PEGs
+#-1: PEGs, 0:non-significant, +1: MEGs
+print(summary(de <- decideTestsDGE(edgeR.lrt, p=fdr_cutoff, adjust="BH")))
+
+print(topTags(edgeR.lrt))
+print("Raw Counts of top hits")
+print(edgeR$counts[as.integer(rownames(topTags(edgeR.lrt))),])
+
+print("====================================================================")
+print("Normalized Counts of top hits")
+print(cpm(edgeR$counts[as.integer(rownames(topTags(edgeR.lrt))),]))
+
+# save all callable genes with edgeR statistics
+write.table(topTags(edgeR.lrt, n=nrow(edgeR.lrt)), file=paste0("edgeR_result_allCallable_", cross, ".txt"), sep="\t", quote=F, row.names=F)
+
+# save list of significant MEGs and PEGs genes at 5% FDR cut-off
+write.table(row.names(counts_summed_over10)[decideTestsDGE(edgeR.lrt, p=0.05, adjust="BH")==-1], file=paste0("edgeR_List_PEGs_", cross, "_FDR5perc.txt"), row.names=F, quote=F, col.names=F)
+write.table(row.names(counts_summed_over10)[decideTestsDGE(edgeR.lrt, p=0.05, adjust="BH")==1], file=paste0("edgeR_List_MEGs_", cross, "_FDR5perc.txt"), row.names=F, quote=F, col.names=F)
+
+# save list of significant MEGs and PEGs genes at 20% FDR cut-off
+write.table(row.names(counts_summed_over10)[decideTestsDGE(edgeR.lrt, p=0.2, adjust="BH")==-1], file=paste0("edgeR_List_PEGs_", cross, "_FDR20perc.txt"), row.names=F, quote=F, col.names=F)
+write.table(row.names(counts_summed_over10)[decideTestsDGE(edgeR.lrt, p=0.2, adjust="BH")==1], file=paste0("edgeR_List_MEGs_", cross, "_FDR20perc.txt"), row.names=F, quote=F, col.names=F)
+
+# save significant results with edgeR statistics
+if (length(which(de !=0)) > 0) {
+  res.sign <- topTags(edgeR.lrt, n=length(which(de != 0)))
+  write.table(data.frame(res.sign), file=paste0("edgeR_result_sign_", cross, ".txt"), row.names=F)
+}
+
+##########################
+# Allelic Imbalance Plot
+##########################
+
+# Sum up counts of biological replicates
+counts_summarized <- data.frame(Gene=row.names(counts_summed_over10))
+counts_summarized$mat_CxL <- rowSums(counts_summed_over10[, is_ColxLer_Sample & grepl("mat_", colnames(counts_summed_over10))])
+counts_summarized$pat_CxL <- rowSums(counts_summed_over10[, is_ColxLer_Sample & grepl("pat_", colnames(counts_summed_over10))])
+counts_summarized$pat_LxC <- rowSums(counts_summed_over10[, !is_ColxLer_Sample & grepl("pat_", colnames(counts_summed_over10))])
+counts_summarized$mat_LxC <- rowSums(counts_summed_over10[, !is_ColxLer_Sample & grepl("mat_", colnames(counts_summed_over10))])
+counts_summarized$CxL_total <- with(counts_summarized, mat_CxL + pat_CxL)
+counts_summarized$LxC_total <- with(counts_summarized, pat_LxC + mat_LxC)
+
+# allelic imbalance plot, significantly imprinted genes (PEGs in blue, MEGS in red)
+# we add 0.5 counts to divisor to prevent division by zero
+ggplot(data=counts_summarized, aes(x=mat_CxL/(CxL_total+.5)*100, y=mat_LxC/(LxC_total+.5)*100, size=log10(CxL_total+LxC_total), color=as.factor(de))) +
+  geom_point(alpha=c(1,0.4,1)[as.factor(de)]) +
+  theme_bw() +
+  scale_color_manual(values=c("blue","black","red")) +
+  theme(legend.position = "none") +
+  xlab("% maternal Reads in Col x Ler hybrid") + 
+  ylab("% maternal Reads in Ler x Col hybrid")
+ggsave(paste0("Allelic_Imbalance_", cross, ".pdf"))
