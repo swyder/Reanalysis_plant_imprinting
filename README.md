@@ -1,6 +1,12 @@
 Scripts and data accompanying Wyder et al 2017:    
 Consistent Reanalysis of Genome-wide Imprinting Studies in Plants Using Generalized Linear Models Increases Concordance across Datasets
 bioRxiv https://doi.org/10.1101/180745  
+  
+- An edgeR-based analysis method to identify imprinted genes
+- requires RNA-seq data for reciprocal F1 crosses
+- takes into account biological replicates and count overdispersion
+- outperforms commonly used count statistics (like Fisher's exact or Chi-Square tests)
+- works for any tissue (including triploid endosperm)
 
 ***
 ## Data folders
@@ -23,8 +29,9 @@ python Classify_Alleles.py example_sorted.bam example_Pos_Of_Interest > Counts_A
 
 ### Input: example_Pos_Of_Interest
 A text file with six columns (tab delimited) describing position of interest annotated with overlapping GeneID. For reproducibility, this file should be sorted by chromosome and position (`sort -k1,1 -k2,2nr FILE`)  
-Chr1	37387	37388	G	T	AT1G01060
-...
+  
+Chr1	37387	37388	G	T	AT1G01060  
+...  
 1. chromosome  
 2. start  
 3. end  
